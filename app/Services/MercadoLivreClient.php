@@ -119,13 +119,25 @@ class MercadoLivreClient
         }
     }
 
+    /**
+     * Factory SEC-001: só cria client a partir de contexto já autorizado.
+     */
+    public static function fromAuthorizedContext(
+        \App\Security\AuthorizedAccountContext $context,
+        ?MercadoLivreAuthService $authService = null
+    ): self {
+        return new self($context->accountId(), $authService);
+    }
+
     public function __construct(?int $accountId = null, ?MercadoLivreAuthService $authService = null)
     {
         $this->accountId = $accountId;
         $this->authService = $authService;
 
-        // Se não foi informado accountId, tentar inferir a conta ativa da sessão (fluxo web).
-        // Não inicia sessão automaticamente (para manter compatibilidade com CLI/tests).
+        // SEC-001: NÃO resolver conta por header/GET/POST nem por "última conta ativa" do banco.
+        // Controllers/workers devem autorizar via AccountAccessPolicy e passar accountId explícito.
+        // Sessão: apenas hint best-effort quando o client é criado sem ID (legado web);
+        // ownership deve ter sido validado pelo AccountContextResolver antes.
         if ($this->accountId === null) {
             try {
                 if (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['active_ml_account_id'])) {
@@ -137,32 +149,6 @@ class MercadoLivreClient
             } catch (\Throwable $e) {
                 // best-effort
             }
-        }
-
-        // Fallback HTTP: permitir selecionar conta por header/query quando o client é instanciado sem accountId.
-        // Importante: só faz sentido em contexto HTTP; evita efeitos colaterais em CLI/tests.
-        if ($this->accountId === null && $this->isHttpContext()) {
-            $headerAccountId = (int)($_SERVER['HTTP_X_ML_ACCOUNT_ID'] ?? 0);
-            if ($headerAccountId > 0) {
-                $this->accountId = $headerAccountId;
-            }
-
-            if ($this->accountId === null) {
-                $fromGet = (int)($_GET['ml_account_id'] ?? $_GET['account_id'] ?? 0);
-                $fromPost = (int)($_POST['ml_account_id'] ?? $_POST['account_id'] ?? 0);
-                $candidate = $fromGet > 0 ? $fromGet : $fromPost;
-                if ($candidate > 0) {
-                    $this->accountId = $candidate;
-                }
-            }
-        }
-
-        // Fallback CLI: se nenhuma conta foi resolvida e não estamos em HTTP,
-        // usa a conta active mais recente do banco (cenário cron/worker/cli).
-        // Não ativa em tests (APP_ENV=testing) para respeitar expectativas de null explícito.
-        $isTestEnv = (($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?? '') === 'testing');
-        if ($this->accountId === null && !$this->isHttpContext() && !$isTestEnv) {
-            $this->accountId = $this->resolveDefaultActiveAccount();
         }
 
         // Tokens
@@ -985,6 +971,9 @@ class MercadoLivreClient
             '#^/answers#',
             '#^/my/#',
             '#^/v1/claims#',
+            '#^/moderations/last_moderation#',
+            '#^/moderations/infractions#',
+            '#^/moderations/pictures/diagnostic#',
             // Search é endpoint público - usar searchItems() para forçar public
             // '#^/sites/[^/]+/search#',
         ];
@@ -1839,6 +1828,111 @@ class MercadoLivreClient
         } catch (\Exception $e) {
             log_error('Erro ao obter experiência de compra do item', [
                 'item_id' => $itemId,
+                'error' => $e->getMessage(),
+            ]);
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Última moderação ativa do anúncio (reason/remedy oficiais).
+     *
+     * ML API: GET /moderations/last_moderation/{ITEM_ID}-ITM
+     *
+     * @return list<array<string, mixed>>|array{error: string, message?: string}
+     */
+    public function getLastModeration(string $itemId): array
+    {
+        $itemId = trim($itemId);
+        if ($itemId === '') {
+            return ['error' => 'invalid_item_id', 'message' => 'item_id obrigatório'];
+        }
+
+        // moderation_reference_id = element_id + "-" + element_type (ITM para publicações)
+        $referenceId = str_ends_with($itemId, '-ITM') ? $itemId : $itemId . '-ITM';
+
+        try {
+            $response = $this->get('/moderations/last_moderation/' . rawurlencode($referenceId));
+            if (isset($response['error'])) {
+                return $response;
+            }
+
+            // Docs oficiais: resposta é um ARRAY de moderações (não objeto único).
+            if (!is_array($response)) {
+                return [];
+            }
+
+            return $response;
+        } catch (\Exception $e) {
+            log_error('Erro ao obter last_moderation', [
+                'item_id' => $itemId,
+                'error' => $e->getMessage(),
+            ]);
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Histórico de infrações do vendedor.
+     *
+     * ML API: GET /moderations/infractions/{USER_ID}
+     *
+     * @param array<string, scalar|null> $params date_created_since, limit, offset, language, related_item_id, sort
+     * @return array<string, mixed>
+     */
+    public function getModerationInfractions(string $sellerId, array $params = []): array
+    {
+        $sellerId = trim($sellerId);
+        if ($sellerId === '') {
+            return ['error' => 'invalid_seller_id', 'message' => 'seller_id obrigatório', 'infractions' => []];
+        }
+
+        $defaults = [
+            'language' => 'PT',
+            'limit' => 20,
+            'offset' => 0,
+            'sort' => 'date_created_desc',
+        ];
+        $query = array_merge($defaults, $params);
+
+        try {
+            return $this->get('/moderations/infractions/' . rawurlencode($sellerId), $query);
+        } catch (\Exception $e) {
+            log_error('Erro ao obter infractions', [
+                'seller_id' => $sellerId,
+                'error' => $e->getMessage(),
+            ]);
+            return ['error' => $e->getMessage(), 'infractions' => []];
+        }
+    }
+
+    /**
+     * Diagnóstico preventivo de imagem (antes de associar ao anúncio).
+     *
+     * ML API: POST /moderations/pictures/diagnostic
+     *
+     * @param array{picture_url?: string, picture_id?: string, context: array<string, mixed>, id?: string} $payload
+     * @return array<string, mixed>
+     */
+    public function diagnosePicture(array $payload): array
+    {
+        if (!isset($payload['context']) || !is_array($payload['context'])) {
+            return ['error' => 'invalid_payload', 'message' => 'context é obrigatório'];
+        }
+
+        $hasUrl = isset($payload['picture_url']) && is_string($payload['picture_url']) && $payload['picture_url'] !== '';
+        $hasId = isset($payload['picture_id']) && is_string($payload['picture_id']) && $payload['picture_id'] !== '';
+        if ($hasUrl === $hasId) {
+            return [
+                'error' => 'invalid_payload',
+                'message' => 'Envie exatamente um de: picture_url ou picture_id',
+            ];
+        }
+
+        try {
+            return $this->post('/moderations/pictures/diagnostic', $payload);
+        } catch (\Exception $e) {
+            log_error('Erro no diagnóstico de imagem ML', [
                 'error' => $e->getMessage(),
             ]);
             return ['error' => $e->getMessage()];

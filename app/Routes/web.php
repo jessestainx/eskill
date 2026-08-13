@@ -18,8 +18,9 @@ use App\Controllers\CatalogCloneController;
 $router->get('', DashboardController::class, 'index');
 $router->get('dashboard', DashboardController::class, 'index');
 $router->get('ai-center', AICenterController::class, 'index'); // Alias for /dashboard/ai-center
-$router->get('ai-optimization', AICenterController::class, 'index'); // AI Optimization page
-$router->get('dashboard/ai-center', AICenterController::class, 'index'); // NEW: AI Center
+// Alias legado da Central de IA — NÃO confundir com /dashboard/ai-optimization (SEO Killer)
+$router->get('ai-optimization', AICenterController::class, 'index');
+$router->get('dashboard/ai-center', AICenterController::class, 'index');
 $router->get('dashboard/metrics', DashboardController::class, 'metrics'); // API endpoint called by frontend
 
 // Quality Dashboard (NEW - implementado)
@@ -33,6 +34,10 @@ $router->get('api/account-health/diagnostic', AccountHealthController::class, 'g
 $router->get('api/account-health/pillar/{pillarName}', AccountHealthController::class, 'getPillar');
 $router->get('api/account-health/history', AccountHealthController::class, 'getHistory');
 $router->post('api/account-health/refresh', AccountHealthController::class, 'refresh');
+
+// Visibilidade de anúncios / irregularidades (read-only)
+use App\Controllers\ListingVisibilityController;
+$router->get('dashboard/listing-visibility', ListingVisibilityController::class, 'index');
 
 // 🆕 Advanced Account Health Diagnostics
 $router->get('api/account-health/advanced/status', AccountHealthController::class, 'getAdvancedStatus');
@@ -444,9 +449,10 @@ $router->post('dashboard/financials/conciliation/upload', 'App\Controllers\Settl
 $router->get('dashboard/financials/conciliation/reconcile', 'App\Controllers\SettlementController', 'reconcile');
 
 // Competitor Intelligence (Phase 16)
-$router->get('dashboard/competitors', 'App\Controllers\CompetitorController', 'index');
+// Dashboard HTML; APIs canônicas em app/Routes/api/items.php (evita registro duplicado).
+$router->get('dashboard/competitors', 'App\Controllers\DashboardController', 'competitors');
 $router->post('dashboard/competitors/add', 'App\Controllers\CompetitorController', 'add');
-$router->get('dashboard/competitors/details/{id}', 'App\Controllers\CompetitorController', 'index');
+$router->get('dashboard/competitors/details/{id}', 'App\Controllers\DashboardController', 'competitors');
 
 // SEO & Gap Advanced Routes
 $router->get('api/seo/gap-analysis', DashboardController::class, 'gapAnalysis');
@@ -455,8 +461,8 @@ $router->post('api/seo/generate-content', DashboardController::class, 'generateC
 // SEO Killer Dashboard
 $router->get('dashboard/seo-killer', ViewController::class, 'seoKiller');
 
-// Tech Sheet (Ficha Técnica) Dashboard
-$router->get('dashboard/seo/ficha-tecnica', ViewController::class, 'techSheet');
+// Tech Sheet (Ficha Técnica) — canônico: /dashboard/tech-sheet
+$router->get('dashboard/seo/ficha-tecnica', ViewController::class, 'techSheetRedirect');
 $router->get('dashboard/tech-sheet', ViewController::class, 'techSheet');
 
 // Brand Analysis Dashboard
@@ -476,7 +482,7 @@ $router->get('assets/js/seo-killer.js', 'App\Controllers\AssetController', 'seoK
 // Public SEO Routes (No Auth)
 $router->get('p/{slug}', \App\Controllers\PublicProductController::class, 'show');
 $router->get('sitemap.xml', \App\Controllers\SitemapController::class, 'index');
-$router->get('api/jobs/{id}', \App\Controllers\DashboardController::class, 'jobStatus');
+// api/jobs/{id} canônico: JobController::getJob (app/Routes/api/items.php) — removida duplicata DashboardController::jobStatus
 
 // AI Agents (Phase 20 & NextGen)
 $router->get('api/agent/projects', 'App\Controllers\AgentController', 'listProjects');
